@@ -272,7 +272,7 @@ def create_entry():
         return jsonify({"error": str(e)}), 500
 
 # Basic HTML form for testing
-@app.route('/entry-form')
+@app.route('/entry-form') 
 def entry_form():
     return '''
     <form action="/api/entries" method="post" enctype="multipart/form-data">
