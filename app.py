@@ -10,6 +10,7 @@ import uuid
 
 load_dotenv()
 
+
 app = Flask(__name__)
 
 # Setup JWT
