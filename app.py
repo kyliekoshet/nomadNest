@@ -6,6 +6,7 @@ from google.cloud import bigquery
 from google.cloud import storage
 import os
 from dotenv import load_dotenv
+import uuid
 
 load_dotenv()
 
@@ -17,8 +18,8 @@ app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)
 jwt = JWTManager(app)
 
 # Initialize BigQuery client
-client = bigquery.Client(project=os.getenv('GOOGLE_CLOUD_PROJECT'))
-DATASET_NAME = 'nomads-nest'
+client = bigquery.Client(project='nomads-nest')  # Replace with your actual project ID
+DATASET_NAME = 'NomadNest'
 TABLE_NAME = 'users'
 
 # Add this to your existing imports and setup
@@ -44,6 +45,20 @@ def upload_image_to_gcs(file, user_id):
     except Exception as e:
         print(f"Error uploading image: {e}")
         return None
+
+def check_id_exists(table, column, value):
+    """Check if a given ID already exists in a specified table and column."""
+    query = f"""
+        SELECT COUNT(*) AS count
+        FROM `{client.project}.{DATASET_NAME}.{table}`
+        WHERE {column} = @value
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("value", "STRING", value)]
+    )
+    query_job = client.query(query, job_config=job_config)
+    result = list(query_job.result())
+    return result[0].count > 0
 
 @app.route('/')
 def index():
@@ -175,10 +190,101 @@ def protected():
     current_user = get_jwt_identity()
     return jsonify({"logged_in_as": current_user}), 200
 
-@app.route('/users')
-def show_users():
-    return jsonify({"users": list(users.keys()), "passwords": list(users.values())})
+@app.route('/api/entries', methods=['POST'])
+@jwt_required()
+def create_entry():
+    user_id = get_jwt_identity()
+    
+    try:
+        # Generate unique entry_id
+        while True:
+            entry_id = str(uuid.uuid4())
+            if not check_id_exists("text_entries", "entry_id", entry_id):
+                break
+
+        # 1. Handle text entry
+        text_entry = {
+            "entry_id": entry_id,
+            "user_id": user_id,
+            "title": request.form.get("title"),
+            "content": request.form.get("content"),
+            "location": request.form.get("location"),
+            "latitude": float(request.form.get("latitude")),
+            "longitude": float(request.form.get("longitude")),
+            "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        # Insert into text_entries table
+        text_table_id = f"{client.project}.{DATASET_NAME}.text_entries"
+        errors = client.insert_rows_json(text_table_id, [text_entry])
+        if errors:
+            return jsonify({"error": f"Error inserting text entry: {errors}"}), 500
+
+        # 2. Handle photos
+        photos = request.files.getlist("photos")
+        for photo in photos:
+            if photo:
+                while True:
+                    photo_id = str(uuid.uuid4())
+                    if not check_id_exists("photos", "photo_id", photo_id):
+                        break
+                photo_url = upload_image_to_gcs(photo, entry_id)
+                
+                if photo_url:
+                    photo_data = {
+                        "photo_id": photo_id,
+                        "entry_id": entry_id,
+                        "photo_url": photo_url,
+                        "uploaded_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    # Insert into photos table
+                    photos_table_id = f"{client.project}.{DATASET_NAME}.photos"
+                    client.insert_rows_json(photos_table_id, [photo_data])
+
+        # 3. Handle expenses
+        expenses = request.form.getlist("expenses")
+        for expense in expenses:
+            if expense:
+                while True:
+                    expense_id = str(uuid.uuid4())
+                    if not check_id_exists("expenses", "expense_id", expense_id):
+                        break
+                category, amount = expense.split(":")
+                expense_data = {
+                    "expense_id": expense_id,
+                    "entry_id": entry_id,
+                    "user_id": user_id,
+                    "category": category,
+                    "amount": float(amount),
+                    "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                # Insert into expenses table
+                expenses_table_id = f"{client.project}.{DATASET_NAME}.expenses"
+                client.insert_rows_json(expenses_table_id, [expense_data])
+
+        return jsonify({
+            "message": "Entry created successfully",
+            "entry_id": entry_id
+        }), 201
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Basic HTML form for testing
+@app.route('/entry-form')
+def entry_form():
+    return '''
+    <form action="/api/entries" method="post" enctype="multipart/form-data">
+        <input type="text" name="title" placeholder="Title"><br>
+        <textarea name="content" placeholder="Content"></textarea><br>
+        <input type="text" name="location" placeholder="Location"><br>
+        <input type="text" name="latitude" placeholder="Latitude"><br>
+        <input type="text" name="longitude" placeholder="Longitude"><br>
+        <input type="file" name="photos" multiple><br>
+        <input type="text" name="expenses" placeholder="category:amount"><br>
+        <input type="submit" value="Create Entry">
+    </form>
+    '''
 
 if __name__ == '__main__':
-    create_users_table()
     app.run(debug=True)
