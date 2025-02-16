@@ -175,8 +175,7 @@ def login():
     if not check_password_hash(user.password_hash, password):
         return jsonify({"error": "Wrong password"}), 401
 
-    access_token = create_access_token(identity=user.user_id)
-    return jsonify({"access_token": access_token}), 200
+    return jsonify({"message": "Login successful"}), 200
 
 
 @app.route('/entry-form')
@@ -233,6 +232,7 @@ def create_entry():
                         "photo_id": photo_id,
                         "entry_id": entry_id,
                         "photo_url": photo_url,
+                        "user_id": 1, # TODO: come back and change once implemented authentication
                         "uploaded_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
                     }
                     photos_table_id = f"{client.project}.{DATASET_NAME}.photos"
@@ -253,6 +253,7 @@ def create_entry():
                     "entry_id": entry_id,
                     "category": category,
                     "amount": float(amount),
+                    "user_id": 1, # TODO: come back and change once implemented authentication
                     "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 expenses_table_id = f"{client.project}.{DATASET_NAME}.expenses"
@@ -375,6 +376,77 @@ def get_users():
 
     except Exception as e:
         print(f"Error fetching users: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/users/<user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    try:
+        # First, check if user exists
+        user_query = f"""
+        SELECT COUNT(*) as count
+        FROM `{client.project}.{DATASET_NAME}.users`
+        WHERE user_id = @user_id
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("user_id", "STRING", user_id)
+            ]
+        )
+        user_exists = list(client.query(user_query, job_config=job_config))[0].count
+        
+        if not user_exists:
+            return jsonify({"error": "User not found"}), 404
+
+        # Get all entry_ids for this user
+        entries_query = f"""
+        SELECT entry_id
+        FROM `{client.project}.{DATASET_NAME}.text_entries`
+        WHERE CAST(user_id AS STRING) = @user_id
+        """
+        entries = list(client.query(entries_query, job_config=job_config))
+        entry_ids = [entry.entry_id for entry in entries]
+
+        if entry_ids:
+            # Delete associated photos
+            photos_query = f"""
+            DELETE FROM `{client.project}.{DATASET_NAME}.photos`
+            WHERE entry_id IN UNNEST(@entry_ids)
+            """
+            photos_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter("entry_ids", "INTEGER", entry_ids)
+                ]
+            )
+            client.query(photos_query, job_config=photos_config).result()
+
+            # Delete associated expenses
+            expenses_query = f"""
+            DELETE FROM `{client.project}.{DATASET_NAME}.expenses`
+            WHERE entry_id IN UNNEST(@entry_ids)
+            """
+            client.query(expenses_query, job_config=photos_config).result()
+
+            # Delete the entries
+            entries_delete_query = f"""
+            DELETE FROM `{client.project}.{DATASET_NAME}.text_entries`
+            WHERE entry_id IN UNNEST(@entry_ids)
+            """
+            client.query(entries_delete_query, job_config=photos_config).result()
+
+        # Finally, delete the user
+        user_delete_query = f"""
+        DELETE FROM `{client.project}.{DATASET_NAME}.users`
+        WHERE user_id = @user_id
+        """
+        client.query(user_delete_query, job_config=job_config).result()
+
+        return jsonify({
+            "message": "User and all associated data deleted successfully",
+            "deleted_entries": len(entry_ids)
+        }), 200
+
+    except Exception as e:
+        print("Delete error:", str(e))
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
