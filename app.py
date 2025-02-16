@@ -13,19 +13,17 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# Setup JWT
-app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)
-jwt = JWTManager(app)
-
 # Initialize BigQuery client
-client = bigquery.Client(project='nomads-nest')  # Replace with your actual project ID
+client = bigquery.Client(project='nomads-nest') 
 DATASET_NAME = 'NomadNest'
 TABLE_NAME = 'users'
 
-# Add this to your existing imports and setup
 storage_client = storage.Client()
 BUCKET_NAME = "nomads-nest-profile-pics"  # You'll need to create this bucket
+
+@app.route('/')
+def index():
+    return "<h1>Hello World</h1>"
 
 def upload_image_to_gcs(file, user_id):
     """Upload image to Google Cloud Storage and return public URL"""
@@ -61,9 +59,6 @@ def check_id_exists(table, column, value):
     result = list(query_job.result())
     return result[0].count > 0
 
-@app.route('/')
-def index():
-    return "<h1>Hello World</h1>"
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -184,95 +179,8 @@ def login():
     access_token = create_access_token(identity=user.user_id)
     return jsonify({"access_token": access_token}), 200
 
-# Protected route example
-@app.route('/protected', methods=['GET'])
-@jwt_required()
-def protected():
-    current_user = get_jwt_identity()
-    return jsonify({"logged_in_as": current_user}), 200
 
-@app.route('/api/entries', methods=['POST'])
-@jwt_required()
-def create_entry():
-    user_id = get_jwt_identity()
-    
-    try:
-        # Generate unique entry_id
-        while True:
-            entry_id = str(uuid.uuid4())
-            if not check_id_exists("text_entries", "entry_id", entry_id):
-                break
-
-        # 1. Handle text entry
-        text_entry = {
-            "entry_id": entry_id,
-            "user_id": user_id,
-            "title": request.form.get("title"),
-            "content": request.form.get("content"),
-            "location": request.form.get("location"),
-            "latitude": float(request.form.get("latitude")),
-            "longitude": float(request.form.get("longitude")),
-            "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        }
-        
-        # Insert into text_entries table
-        text_table_id = f"{client.project}.{DATASET_NAME}.text_entries"
-        errors = client.insert_rows_json(text_table_id, [text_entry])
-        if errors:
-            return jsonify({"error": f"Error inserting text entry: {errors}"}), 500
-
-        # 2. Handle photos
-        photos = request.files.getlist("photos")
-        for photo in photos:
-            if photo:
-                while True:
-                    photo_id = str(uuid.uuid4())
-                    if not check_id_exists("photos", "photo_id", photo_id):
-                        break
-                photo_url = upload_image_to_gcs(photo, entry_id)
-                
-                if photo_url:
-                    photo_data = {
-                        "photo_id": photo_id,
-                        "entry_id": entry_id,
-                        "photo_url": photo_url,
-                        "uploaded_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-                    }
-                    # Insert into photos table
-                    photos_table_id = f"{client.project}.{DATASET_NAME}.photos"
-                    client.insert_rows_json(photos_table_id, [photo_data])
-
-        # 3. Handle expenses
-        expenses = request.form.getlist("expenses")
-        for expense in expenses:
-            if expense:
-                while True:
-                    expense_id = str(uuid.uuid4())
-                    if not check_id_exists("expenses", "expense_id", expense_id):
-                        break
-                category, amount = expense.split(":")
-                expense_data = {
-                    "expense_id": expense_id,
-                    "entry_id": entry_id,
-                    "user_id": user_id,
-                    "category": category,
-                    "amount": float(amount),
-                    "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-                }
-                # Insert into expenses table
-                expenses_table_id = f"{client.project}.{DATASET_NAME}.expenses"
-                client.insert_rows_json(expenses_table_id, [expense_data])
-
-        return jsonify({
-            "message": "Entry created successfully",
-            "entry_id": entry_id
-        }), 201
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# Basic HTML form for testing
-@app.route('/entry-form') 
+@app.route('/entry-form')
 def entry_form():
     return '''
     <form action="/api/entries" method="post" enctype="multipart/form-data">
@@ -287,5 +195,161 @@ def entry_form():
     </form>
     '''
 
+@app.route('/api/entries', methods=['POST'])
+def create_entry():
+    try:
+        # Generate unique entry_id
+        while True:
+            entry_id = str(uuid.uuid4())
+            if not check_id_exists("text_entries", "entry_id", entry_id):
+                break
+
+        # Handle text entry
+        text_entry = {
+            "entry_id": entry_id,
+            "title": request.form.get("title"),
+            "content": request.form.get("content"),
+            "location": request.form.get("location"),
+            "latitude": float(request.form.get("latitude")),
+            "longitude": float(request.form.get("longitude")),
+            "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        # Insert into text_entries table
+        text_table_id = f"{client.project}.{DATASET_NAME}.text_entries"
+        errors = client.insert_rows_json(text_table_id, [text_entry])
+        if errors:
+            return jsonify({"error": f"Error inserting text entry: {errors}"}), 500
+
+        # Handle photos
+        photos = request.files.getlist("photos")
+        photo_urls = []
+        for photo in photos:
+            if photo:
+                while True:
+                    photo_id = str(uuid.uuid4())
+                    if not check_id_exists("photos", "photo_id", photo_id):
+                        break
+                photo_url = upload_image_to_gcs(photo, entry_id)
+                if photo_url:
+                    photo_data = {
+                        "photo_id": photo_id,
+                        "entry_id": entry_id,
+                        "photo_url": photo_url,
+                        "uploaded_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    photos_table_id = f"{client.project}.{DATASET_NAME}.photos"
+                    client.insert_rows_json(photos_table_id, [photo_data])
+                    photo_urls.append(photo_url)
+
+        # Handle expenses
+        expenses = request.form.getlist("expenses")
+        for expense in expenses:
+            if expense:
+                category, amount = expense.split(":")
+                while True:
+                    expense_id = str(uuid.uuid4())
+                    if not check_id_exists("expenses", "expense_id", expense_id):
+                        break
+                expense_data = {
+                    "expense_id": expense_id,
+                    "entry_id": entry_id,
+                    "category": category,
+                    "amount": float(amount),
+                    "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                expenses_table_id = f"{client.project}.{DATASET_NAME}.expenses"
+                client.insert_rows_json(expenses_table_id, [expense_data])
+
+        return jsonify({
+            "message": "Entry created successfully",
+            "entry_id": entry_id,
+            "photo_urls": photo_urls
+        }), 201
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/entries', methods=['GET'])
+def get_entries():
+    try:
+        query = f"""
+        SELECT 
+            t.entry_id,
+            t.user_id,
+            t.title,
+            t.content,
+            t.location,
+            t.latitude,
+            t.longitude,
+            t.created_at,
+            ARRAY_AGG(p.photo_url IGNORE NULLS) as photo_urls,
+            ARRAY_AGG(e.category IGNORE NULLS) as expense_categories,
+            ARRAY_AGG(e.amount IGNORE NULLS) as expense_amounts,
+            ARRAY_AGG(e.currency IGNORE NULLS) as expense_currencies,
+            u.full_name,
+            u.profile_pic_url
+        FROM `{client.project}.{DATASET_NAME}.text_entries` t
+        LEFT JOIN `{client.project}.{DATASET_NAME}.photos` p 
+            ON t.entry_id = p.entry_id
+        LEFT JOIN `{client.project}.{DATASET_NAME}.expenses` e 
+            ON t.entry_id = e.entry_id
+        LEFT JOIN `{client.project}.{DATASET_NAME}.users` u 
+            ON CAST(t.user_id AS STRING) = u.user_id
+        GROUP BY 
+            t.entry_id,
+            t.user_id,
+            t.title,
+            t.content,
+            t.location,
+            t.latitude,
+            t.longitude,
+            t.created_at,
+            u.full_name,
+            u.profile_pic_url
+        ORDER BY t.created_at DESC
+        """
+
+        query_job = client.query(query)
+        entries = []
+
+        for row in query_job:
+            # Combine expense details into a list of dictionaries
+            expenses = []
+            for i in range(len(row.expense_categories)):
+                if row.expense_categories[i]:  # Check if category exists
+                    expenses.append({
+                        "category": row.expense_categories[i],
+                        "amount": row.expense_amounts[i],
+                        "currency": row.expense_currencies[i]
+                    })
+
+            entry = {
+                "entry_id": row.entry_id,
+                "user_id": row.user_id,
+                "title": row.title,
+                "content": row.content,
+                "location": row.location,
+                "latitude": row.latitude,
+                "longitude": row.longitude,
+                "created_at": row.created_at.strftime('%Y-%m-%d %H:%M:%S') if row.created_at else None,
+                "author": {
+                    "name": row.full_name,
+                    "profile_pic": row.profile_pic_url
+                } if row.full_name else None,
+                "photos": [url for url in row.photo_urls if url is not None],
+                "expenses": expenses
+            }
+            entries.append(entry)
+
+        return jsonify({
+            "entries": entries,
+            "count": len(entries)
+        }), 200
+
+    except Exception as e:
+        print("Error details:", e)  # This will show in your Flask logs
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5001)
