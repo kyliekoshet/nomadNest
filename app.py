@@ -1,7 +1,6 @@
 from flask import Flask, jsonify, request
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import timedelta, datetime
+from datetime import datetime
 from google.cloud import bigquery
 from google.cloud import storage
 import os
@@ -204,7 +203,6 @@ def create_entry():
             if not check_id_exists("text_entries", "entry_id", entry_id):
                 break
 
-        # Handle text entry
         text_entry = {
             "entry_id": entry_id,
             "title": request.form.get("title"),
@@ -215,7 +213,6 @@ def create_entry():
             "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         }
         
-        # Insert into text_entries table
         text_table_id = f"{client.project}.{DATASET_NAME}.text_entries"
         errors = client.insert_rows_json(text_table_id, [text_entry])
         if errors:
@@ -314,10 +311,9 @@ def get_entries():
         entries = []
 
         for row in query_job:
-            # Combine expense details into a list of dictionaries
             expenses = []
             for i in range(len(row.expense_categories)):
-                if row.expense_categories[i]:  # Check if category exists
+                if row.expense_categories[i]:
                     expenses.append({
                         "category": row.expense_categories[i],
                         "amount": row.expense_amounts[i],
@@ -348,8 +344,38 @@ def get_entries():
         }), 200
 
     except Exception as e:
-        print("Error details:", e)  # This will show in your Flask logs
+        print("Error details:", e) 
+        return jsonify({"error": str(e)}), 500
+    
+def read_users():
+    query = f"""
+        SELECT user_id, email, full_name, profile_pic_url, created_at, password_hash
+        FROM `{client.project}.{DATASET_NAME}.users`
+    """
+    query_job = client.query(query)
+    results = list(query_job.result())
+    return results
+
+@app.route('/api/users', methods=['GET'])  # /api/ for API endpoints
+def get_users():
+    try:
+        users = read_users()
+        user_list = []
+        for user in users:
+            user_data = {
+                "user_id": user.user_id,
+                "email": user.email,
+                "password_hash": user.password_hash,
+                "full_name": user.full_name,
+                "profile_pic_url": user.profile_pic_url,
+                "created_at": user.created_at.strftime('%Y-%m-%d %H:%M:%S') if user.created_at else None
+            }
+            user_list.append(user_data)
+        return jsonify({"users": user_list}), 200
+
+    except Exception as e:
+        print(f"Error fetching users: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5001)
+    app.run(debug=True)
