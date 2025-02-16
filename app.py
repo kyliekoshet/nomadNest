@@ -356,7 +356,7 @@ def read_users():
     results = list(query_job.result())
     return results
 
-@app.route('/api/users', methods=['GET'])  # /api/ for API endpoints
+@app.route('/api/users', methods=['GET']) 
 def get_users():
     try:
         users = read_users()
