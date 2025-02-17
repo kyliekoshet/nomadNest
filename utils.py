@@ -1,6 +1,7 @@
 from google.cloud import storage, bigquery
 import os
 import uuid
+from datetime import datetime
 
 storage_client = storage.Client()
 client = bigquery.Client(project='nomads-nest') 
@@ -69,3 +70,103 @@ def get_user_by_email(email):
     query_job = client.query(query, job_config=job_config)
     results = list(query_job.result())
     return results[0] if results else None
+
+def delete_photos_from_storage(conditions, query_params):
+    """Helper function to delete photos from both storage and database"""
+    photo_query = f"""
+    SELECT photo_id, photo_url
+    FROM `{client.project}.{DATASET_NAME}.photos`
+    WHERE {" AND ".join(conditions)}
+    """
+
+    job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+    query_job = client.query(photo_query, job_config=job_config)
+
+    deleted_photos = []
+    errors = []
+    
+    bucket = storage_client.bucket(BUCKET_NAME)
+    for row in query_job:
+        try:
+            if row.photo_url:
+                blob_name = f"entry_photos/{row.photo_url.split('/')[-1]}"
+                blob = bucket.blob(blob_name)
+                if blob.exists():
+                    blob.delete()
+                deleted_photos.append(row.photo_id)
+        except Exception as e:
+            errors.append(f"Error deleting photo {row.photo_id}: {str(e)}")
+
+    return deleted_photos, errors
+
+def insert_text_entry(entry_id, form_data):
+    """Insert a new text entry into the database"""
+    try:
+        text_entry = {
+            "entry_id": entry_id,
+            "title": form_data.get("title"),
+            "content": form_data.get("content"),
+            "location": form_data.get("location"),
+            "latitude": float(form_data.get("latitude")) if form_data.get("latitude") else 0.0,
+            "longitude": float(form_data.get("longitude")) if form_data.get("longitude") else 0.0,
+            "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        text_table_id = f"{client.project}.{DATASET_NAME}.text_entries"
+        errors = client.insert_rows_json(text_table_id, [text_entry])
+        return errors
+    except Exception as e:
+        print(f"Error in insert_text_entry: {str(e)}")
+        raise
+
+def handle_photos(entry_id, photos):
+    """Handle photo uploads and return their URLs"""
+    photo_urls = []
+    
+    try:
+        for i, photo in enumerate(photos):
+            if photo:
+                photo_id = generate_unique_id("photos", "photo_id")
+                photo_url = upload_image_to_gcs(photo, entry_id)
+                
+                if photo_url:
+                    photo_data = {
+                        "photo_id": photo_id,
+                        "entry_id": entry_id,
+                        "photo_url": photo_url,
+                        "user_id": 1,
+                        "uploaded_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    
+                    photos_table_id = f"{client.project}.{DATASET_NAME}.photos"
+                    errors = client.insert_rows_json(photos_table_id, [photo_data])
+                    
+                    photo_urls.append(photo_url)
+        return photo_urls
+    except Exception as e:
+        print(f"Error in handle_photos: {str(e)}")
+        raise
+
+def handle_expenses(entry_id, expenses):
+    """Handle expenses and insert them into the database"""
+    try:
+        for i, expense in enumerate(expenses):
+            if expense:
+                category, amount = expense.split(":")
+                expense_id = generate_unique_id("expenses", "expense_id")
+                
+                expense_data = {
+                    "expense_id": expense_id,
+                    "entry_id": entry_id,
+                    "category": category,
+                    "amount": float(amount),
+                    "user_id": 1,
+                    "created_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                
+                expenses_table_id = f"{client.project}.{DATASET_NAME}.expenses"
+                errors = client.insert_rows_json(expenses_table_id, [expense_data])
+                print(f"Expense insert errors (if any): {errors}")
+    except Exception as e:
+        print(f"Error in handle_expenses: {str(e)}")
+        raise

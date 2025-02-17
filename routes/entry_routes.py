@@ -1,7 +1,13 @@
 from flask import Blueprint, jsonify, request
 from werkzeug.utils import secure_filename
 from config import client, DATASET_NAME, storage_client, BUCKET_NAME
-from utils import check_id_exists, upload_image_to_gcs, generate_unique_id
+from utils import (
+    delete_photos_from_storage, 
+    insert_text_entry, 
+    handle_photos, 
+    handle_expenses,
+    generate_unique_id
+)
 import uuid
 from datetime import datetime
 from google.cloud import bigquery
@@ -747,46 +753,15 @@ def delete_photo():
                 "error": "Please provide at least one parameter (photo_id, entry_id, or user_id)"
             }), 400
 
-        # First get the photos that will be deleted
-        query = f"""
-        SELECT photo_url, photo_id
-        FROM `{client.project}.{DATASET_NAME}.photos`
-        WHERE {" AND ".join(conditions)}
-        """
-
-        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
-        query_job = client.query(query, job_config=job_config)
+        deleted_photos, errors = delete_photos_from_storage(conditions, query_params)
         
-        deleted_photos = []
-        errors = []
-        
-        # Delete files from Cloud Storage
-        bucket = storage_client.bucket(BUCKET_NAME)
-        for row in query_job:
-            try:
-                if row.photo_url:
-                    # Extract blob name from URL, assuming URL format includes 'entry_photos/'
-                    blob_name = f"entry_photos/{row.photo_url.split('/')[-1]}"
-                    print(f"Attempting to delete blob: {blob_name}")  # Debug print
-                    
-                    blob = bucket.blob(blob_name)
-                    if blob.exists():
-                        blob.delete()
-                        deleted_photos.append(row.photo_id)
-                    else:
-                        print(f"Blob not found: {blob_name}")
-                        # Continue with database deletion even if file doesn't exist
-                        deleted_photos.append(row.photo_id)
-            except Exception as e:
-                errors.append(f"Error deleting photo {row.photo_id}: {str(e)}")
-
-        # Delete from BigQuery regardless of storage deletion success
+        # Delete from database
         if deleted_photos:
             delete_query = f"""
             DELETE FROM `{client.project}.{DATASET_NAME}.photos`
             WHERE {" AND ".join(conditions)}
             """
-            
+            job_config = bigquery.QueryJobConfig(query_parameters=query_params)
             delete_job = client.query(delete_query, job_config=job_config)
             delete_job.result()
 
@@ -805,3 +780,71 @@ def delete_photo():
     except Exception as e:
         print(f"Error deleting photos: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@entry_bp.route('/api/entries', methods=['DELETE'])
+def delete_entries():
+    try:
+        # Get query parameters
+        entry_id = request.args.get('entry_id')
+        user_id = request.args.get('user_id')
+
+        # Build query conditions
+        conditions = []
+        query_params = []
+
+        if entry_id:
+            conditions.append("entry_id = @entry_id")
+            query_params.append(bigquery.ScalarQueryParameter("entry_id", "STRING", entry_id))
+            
+        if user_id:
+            conditions.append("CAST(user_id AS STRING) = @user_id")
+            query_params.append(bigquery.ScalarQueryParameter("user_id", "STRING", user_id))
+
+        if not conditions:
+            return jsonify({
+                "error": "Please provide either entry_id or user_id as a parameter"
+            }), 400
+
+        # Create job_config once and reuse it
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+
+        deleted_photos, errors = delete_photos_from_storage(conditions, query_params)
+        
+        # Delete all related records
+        delete_photos = f"""
+        DELETE FROM `{client.project}.{DATASET_NAME}.photos`
+        WHERE {" AND ".join(conditions)}
+        """
+        
+        delete_expenses = f"""
+        DELETE FROM `{client.project}.{DATASET_NAME}.expenses`
+        WHERE {" AND ".join(conditions)}
+        """
+        
+        delete_entries = f"""
+        DELETE FROM `{client.project}.{DATASET_NAME}.text_entries`
+        WHERE {" AND ".join(conditions)}
+        """
+
+        # Execute deletions using the same job_config
+        client.query(delete_photos, job_config=job_config).result()
+        client.query(delete_expenses, job_config=job_config).result()
+        client.query(delete_entries, job_config=job_config).result()
+
+        if errors:
+            return jsonify({
+                "message": "Partial success",
+                "deleted_photos": deleted_photos,
+                "errors": errors
+            }), 207
+
+        return jsonify({
+            "message": "Entries and related data deleted successfully",
+            "deleted_photos": deleted_photos
+        }), 200
+
+    except Exception as e:
+        print(f"Error deleting entries: {e}")
+        return jsonify({"error": str(e)}), 500
+
