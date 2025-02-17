@@ -658,3 +658,150 @@ def add_entry_photo(entry_id):
         print(f"Error uploading photos: {e}")
         return jsonify({"error": str(e)}), 500
 
+@entry_bp.route('/api/photos', methods=['GET'])
+def get_photos():
+    try:
+        # Get query parameters
+        entry_id = request.args.get('entry_id')
+        user_id = request.args.get('user_id')
+
+        # Build query conditions
+        conditions = []
+        query_params = []
+
+        if entry_id:
+            conditions.append("p.entry_id = @entry_id")
+            query_params.append(bigquery.ScalarQueryParameter("entry_id", "STRING", entry_id))
+            
+        if user_id:
+            conditions.append("CAST(p.user_id AS STRING) = @user_id") 
+            query_params.append(bigquery.ScalarQueryParameter("user_id", "STRING", user_id))
+
+        # If no search params provided, return error
+        if not conditions:
+            return jsonify({
+                "error": "Please provide either entry_id or user_id as a search parameter"
+            }), 400
+
+        # Construct query
+        query = f"""
+        SELECT 
+            p.photo_id,
+            p.entry_id,
+            p.photo_url,
+            p.user_id
+        FROM `{client.project}.{DATASET_NAME}.photos` p
+        WHERE {" AND ".join(conditions)}
+        """
+
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+        query_job = client.query(query, job_config=job_config)
+        photos = []
+
+        for row in query_job:
+            photo = {
+                "photo_id": row.photo_id,
+                "entry_id": row.entry_id,
+                "photo_url": row.photo_url,
+                "user_id": row.user_id,
+            }
+            photos.append(photo)
+
+        return jsonify({
+            "photos": photos,
+            "count": len(photos)
+        }), 200
+
+    except Exception as e:
+        print(f"Error retrieving photos: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+
+@entry_bp.route('/api/photos/delete', methods=['DELETE'])
+def delete_photo():
+    try:
+        # Get parameters from request
+        photo_id = request.args.get('photo_id')
+        entry_id = request.args.get('entry_id') 
+        user_id = request.args.get('user_id')
+
+        # Build query conditions
+        conditions = []
+        query_params = []
+
+        if photo_id:
+            conditions.append("photo_id = @photo_id")
+            query_params.append(bigquery.ScalarQueryParameter("photo_id", "STRING", photo_id))
+            
+        if entry_id:
+            conditions.append("entry_id = @entry_id")
+            query_params.append(bigquery.ScalarQueryParameter("entry_id", "STRING", entry_id))
+            
+        if user_id:
+            conditions.append("CAST(user_id AS STRING) = @user_id")
+            query_params.append(bigquery.ScalarQueryParameter("user_id", "STRING", user_id))
+
+        if not conditions:
+            return jsonify({
+                "error": "Please provide at least one parameter (photo_id, entry_id, or user_id)"
+            }), 400
+
+        # First get the photos that will be deleted
+        query = f"""
+        SELECT photo_url, photo_id
+        FROM `{client.project}.{DATASET_NAME}.photos`
+        WHERE {" AND ".join(conditions)}
+        """
+
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+        query_job = client.query(query, job_config=job_config)
+        
+        deleted_photos = []
+        errors = []
+        
+        # Delete files from Cloud Storage
+        bucket = storage_client.bucket(BUCKET_NAME)
+        for row in query_job:
+            try:
+                if row.photo_url:
+                    # Extract blob name from URL, assuming URL format includes 'entry_photos/'
+                    blob_name = f"entry_photos/{row.photo_url.split('/')[-1]}"
+                    print(f"Attempting to delete blob: {blob_name}")  # Debug print
+                    
+                    blob = bucket.blob(blob_name)
+                    if blob.exists():
+                        blob.delete()
+                        deleted_photos.append(row.photo_id)
+                    else:
+                        print(f"Blob not found: {blob_name}")
+                        # Continue with database deletion even if file doesn't exist
+                        deleted_photos.append(row.photo_id)
+            except Exception as e:
+                errors.append(f"Error deleting photo {row.photo_id}: {str(e)}")
+
+        # Delete from BigQuery regardless of storage deletion success
+        if deleted_photos:
+            delete_query = f"""
+            DELETE FROM `{client.project}.{DATASET_NAME}.photos`
+            WHERE {" AND ".join(conditions)}
+            """
+            
+            delete_job = client.query(delete_query, job_config=job_config)
+            delete_job.result()
+
+        if errors:
+            return jsonify({
+                "message": "Partial success",
+                "deleted_photos": deleted_photos,
+                "errors": errors
+            }), 207  # 207 Multi-Status
+
+        return jsonify({
+            "message": "Photos deleted successfully",
+            "deleted_photos": deleted_photos
+        }), 200
+
+    except Exception as e:
+        print(f"Error deleting photos: {e}")
+        return jsonify({"error": str(e)}), 500
