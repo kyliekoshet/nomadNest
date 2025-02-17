@@ -1,0 +1,5 @@
+expense_id,entry_id,category,amount,currency,user_id
+exp001,entry001,Food,25.50,USD,user123
+exp002,entry001,Transportation,15.00,USD,user123
+exp003,entry002,Accommodation,75.00,EUR,user456
+exp004,entry003,Activities,30.00,USD,user123

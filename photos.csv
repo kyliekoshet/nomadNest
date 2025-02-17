@@ -1,0 +1,5 @@
+photo_id,entry_id,photo_url,user_id
+photo001,entry001,https://example.com/photo1.jpg,user123
+photo002,entry001,https://example.com/photo2.jpg,user123
+photo003,entry002,https://example.com/paris_photo.png,user456
+photo004,entry003,https://example.com/beach.jpeg,user123

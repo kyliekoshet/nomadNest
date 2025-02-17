@@ -1,0 +1,4 @@
+entry_id,title,content,location,latitude,longitude,created_at,user_id
+entry001,My First Entry,This is the content of my first entry.,London,51.5074,-0.1278,2024-07-26 10:00:00 UTC,user123
+entry002,Exploring Paris,I had a wonderful time in Paris. The Eiffel Tower was amazing!,Paris,48.8584,2.2945,2024-07-27 14:30:00 UTC,user123
+entry003,Beach Day,Spent the day relaxing on the beach. It was perfect.,Barcelona,41.3851,2.1755,2024-07-28 09:15:00 UTC,user123
