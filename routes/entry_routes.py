@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request
-from config import client, DATASET_NAME
+from werkzeug.utils import secure_filename
+from config import client, DATASET_NAME, storage_client, BUCKET_NAME
 from utils import check_id_exists, upload_image_to_gcs, generate_unique_id
 import uuid
 from datetime import datetime
@@ -547,4 +548,113 @@ def update_entry_expense(entry_id, expense_id):
     # you cannot UPDATE or DELETE records that are in the streaming buffer 
     # (recently inserted data). The data needs to be "settled" first, which 
     # typically takes about 30 minutes to a few hours.
+
+
+@entry_bp.route('/test-photo-upload')
+def test_photo_upload():
+    return '''
+    <form id="uploadForm" enctype="multipart/form-data">
+        <input type="text" name="entry_id" id="entry_id" placeholder="Entry ID"><br>
+        <input type="file" name="photo" multiple accept="image/png, image/jpeg"><br>
+        <input type="submit" value="Upload Photos">
+    </form>
+    <div id="debug"></div>
+    <script>
+        document.getElementById('uploadForm').onsubmit = async function(e) {
+            e.preventDefault();
+            
+            const entryId = document.getElementById('entry_id').value;
+            if (!entryId) {
+                alert('Please enter an Entry ID');
+                return false;
+            }
+            
+            const formData = new FormData(this);
+            const url = `/api/entries/${entryId}/photo`;
+            
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                document.getElementById('debug').innerHTML = 
+                    response.ok ? 
+                    `Success: ${result.message}` : 
+                    `Error: ${result.error}`;
+            } catch (error) {
+                document.getElementById('debug').innerHTML = `Error: ${error.message}`;
+            }
+        }
+    </script>
+    '''
+
+@entry_bp.route('/api/entries/<entry_id>/photo', methods=['POST'])
+def add_entry_photo(entry_id):
+    try:
+        if not entry_id:
+            return jsonify({"error": "Entry ID is required"}), 400
+            
+        if 'photo' not in request.files:
+            return jsonify({"error": "No photo provided"}), 400
+            
+        files = request.files.getlist('photo')
+        
+        if not files:
+            return jsonify({"error": "No photos selected"}), 400
+
+        uploaded_photos = []
+        
+        for photo in files:
+            if photo.filename == '':
+                continue
+                
+            if not photo.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                continue
+
+            # Generate unique IDs
+            photo_id = generate_unique_id("photos", "photo_id")
+            filename = f"{entry_id}_{secure_filename(photo.filename)}"
+            
+            # Upload photo to Cloud Storage
+            bucket = storage_client.bucket(BUCKET_NAME)
+            blob = bucket.blob(f"entry_photos/{filename}")
+            blob.upload_from_file(photo)
+            
+            # Get public URL
+            photo_url = blob.public_url
+            
+            # Insert into photos table
+            photo_data = {
+                "photo_id": photo_id,
+                "entry_id": entry_id,
+                "photo_url": photo_url,
+                "user_id": 1  # TODO: Replace with actual user_id
+            }
+            
+            photos_table_id = f"{client.project}.{DATASET_NAME}.photos"
+            errors = client.insert_rows_json(photos_table_id, [photo_data])
+            
+            if errors:
+                print(f"Error inserting photo {filename}: {errors}")
+                continue
+                
+            uploaded_photos.append({
+                "photo_id": photo_id,
+                "photo_url": photo_url
+            })
+        
+        if not uploaded_photos:
+            return jsonify({"error": "No photos were successfully uploaded"}), 400
+        
+        
+        return jsonify({
+            "message": f"Successfully uploaded {len(uploaded_photos)} photos",
+            "photos": uploaded_photos
+        }), 200
+        
+    except Exception as e:
+        print(f"Error uploading photos: {e}")
+        return jsonify({"error": str(e)}), 500
 
